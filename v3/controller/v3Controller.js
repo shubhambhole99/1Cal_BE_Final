@@ -6675,8 +6675,11 @@ export async function patchReport(req, res) {
         [b.tools && typeof b.tools === "object" && !Array.isArray(b.tools) ? b.tools : {}, req.params.id]);
     }
     if (b.compare_layout !== undefined) {
-      await sql.unsafe(`UPDATE ${T.reports} SET compare_layout = $1::jsonb, updated_at = NOW() WHERE id = $2`,
-        [JSON.stringify(b.compare_layout || {}), req.params.id]);
+      // Bind the object, as tools does above. Stringifying it first had
+      // postgres.js encode it a second time, so every saved layout read back
+      // as a JSON string and the comparison never restored.
+      await sql.unsafe(`UPDATE ${T.reports} SET compare_layout = $1, updated_at = NOW() WHERE id = $2`,
+        [b.compare_layout && typeof b.compare_layout === "object" && !Array.isArray(b.compare_layout) ? b.compare_layout : {}, req.params.id]);
     }
     const [fresh] = await sql.unsafe(`SELECT * FROM ${T.reports} WHERE id = $1 LIMIT 1`, [req.params.id]);
     const ids = await reportInstanceIds(sql, req.params.id);
