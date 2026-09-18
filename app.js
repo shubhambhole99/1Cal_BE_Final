@@ -21,6 +21,7 @@ import gdriveRoutes from "./routes/gdriveRoutes.js";
 
 // v3 module (merged from BE 2 — self-contained under ./v3/*)
 import v3Routes from "./v3/routes/v3Routes.js";
+import agentRoutes from "./v3/routes/agentRoutes.js";
 import { attachV3User } from "./v3/middleware/v3Auth.js";
 import { ensureTables as ensureV3Tables } from "./v3/db/ensureTables.js";
 
@@ -104,6 +105,15 @@ app.use("/gdrive", gdriveRoutes);
 // Identity for /v3: verify the token when one is sent, so req.user is available
 // to every v3 handler. Deliberately non-rejecting — routes that must not be
 // anonymous use requireV3Auth. See BE/v3/middleware/v3Auth.js.
+// Agent chat (BE/v3/agents/README.md). Mounted before /v3 so the /v3 router
+// never swallows /v3/agents/*. Gated on AGENT_CHAT_ENABLED=true in .env so the
+// routes never deploy by accident; one boot line says which way it went.
+if (process.env.AGENT_CHAT_ENABLED === "true") {
+  app.use("/v3/agents", attachV3User, agentRoutes);
+  console.log("[agents] chat routes mounted");
+} else {
+  console.log("[agents] chat routes disabled (AGENT_CHAT_ENABLED)");
+}
 app.use("/v3", attachV3User, v3Routes);
 
 // Error handling
