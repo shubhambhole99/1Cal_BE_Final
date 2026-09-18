@@ -72,6 +72,28 @@ export async function listAgents(_req, res) {
   }
 }
 
+// What answers have cost so far, for the admin budget calculator: the number
+// of answered questions, the average tokens per answer, the output share of
+// those tokens, and this calendar month's totals. Read-only aggregates.
+export async function getStats(_req, res) {
+  try {
+    await ready();
+    const sql = getSql();
+    const [s] = await sql.unsafe(
+      `SELECT COUNT(*)::int AS questions,
+              COALESCE(ROUND(AVG(input_tokens + output_tokens)), 0)::int AS avg_total_tokens,
+              SUM(output_tokens)::float / NULLIF(SUM(input_tokens + output_tokens), 0) AS output_share,
+              COALESCE(SUM(input_tokens) FILTER (WHERE created_at >= date_trunc('month', NOW())), 0)::int AS month_input_tokens,
+              COALESCE(SUM(output_tokens) FILTER (WHERE created_at >= date_trunc('month', NOW())), 0)::int AS month_output_tokens
+         FROM ${T.messages}
+        WHERE role = 'assistant' AND input_tokens + output_tokens > 0`,
+    );
+    res.json({ stats: s });
+  } catch (e) {
+    fail(res, e, "getStats");
+  }
+}
+
 export async function getAgent(req, res) {
   try {
     await ready();

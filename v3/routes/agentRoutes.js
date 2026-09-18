@@ -6,6 +6,7 @@ import * as ctrl from "../agents/controller.js";
 const router = express.Router();
 
 router.get("/", ctrl.listAgents);
+router.get("/stats", ctrl.getStats); // before /:key, like /chats
 
 // Literal /chats routes before /:key so "chats" is never read as an agent key.
 router.get("/chats", ctrl.listChats);
