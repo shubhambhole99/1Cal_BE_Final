@@ -599,6 +599,8 @@ export async function ensureTables() {
       // Report branding — { letterhead: <dataURL>, watermark: <dataURL>,
       // letterheadEnabled, watermarkEnabled, watermarkPages: "all"|[pageId], ... }.
       `ALTER TABLE ${ref("v3_templates")} ADD COLUMN IF NOT EXISTS branding JSONB DEFAULT '{}'::jsonb`,
+      // Admin print presets — { slots: [{ name, saved_at, pages: { [pageName]: printSettings }, selected: [pageName] } | null] } (9 slots).
+      `ALTER TABLE ${ref("v3_templates")} ADD COLUMN IF NOT EXISTS print_preset JSONB`,
       // Page groups are now VERSION-scoped content (like pages / master inputs /
       // MI groups). Each version owns its own set. The legacy template-level
       // `v3_templates.page_groups` column above is kept as the pre-migration

@@ -47,7 +47,13 @@ function errorMessage(status, text) {
  * chat({ messages, tools, tool_choice, max_tokens, temperature, thinking, json, model })
  *   thinking (boolean) → chat_template_kwargs.enable_thinking
  *   json (boolean)     → response_format { type: "json_object" }
- * Returns { content, reasoning, toolCalls, finish, usage: { input, output, reasoning }, ms }.
+ * Returns { content, reasoning, toolCalls, finish, usage: { input, output, reasoning, cached }, ms }.
+ *   usage.cached is how many of the input tokens came from Together's prompt cache — the
+ *   automatic prefix cache. Cache hits are billed at the model's cached-input rate
+ *   (e.g. GLM-5.3-Flash: $0.03 / 1M cached vs $0.15 / 1M fresh input) and are much faster.
+ *   Caching kicks in automatically when a request's leading tokens match a recent request;
+ *   there is no flag. To help it hit, keep system prompt + context first and identical
+ *   across turns, and put the user question last.
  * Throws a plain Error carrying the HTTP status and Together's message.
  */
 export async function chat(options = {}) {
@@ -131,10 +137,12 @@ export async function chat(options = {}) {
       reasoning: msg.reasoning_content || msg.reasoning || "",
       toolCalls: Array.isArray(msg.tool_calls) ? msg.tool_calls : [],
       finish: choice.finish_reason || null,
+      model: model || togetherModel(),
       usage: {
         input: Number(usage.prompt_tokens) || 0,
         output: Number(usage.completion_tokens) || 0,
         reasoning: Number(usage.completion_tokens_details?.reasoning_tokens) || 0,
+        cached: Number(usage.prompt_tokens_details?.cached_tokens) || 0,
       },
       ms: Date.now() - t0,
     };

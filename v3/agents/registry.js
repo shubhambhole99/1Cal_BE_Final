@@ -1,4 +1,4 @@
-// The agent registry: the six agents of the 1Cal agent chat, their system
+// The agent registry: the seven agents of the 1Cal agent chat, their system
 // prompts and contexts (loaded from ./seed at startup), the three tables they
 // live in and the upsert that seeds them. See README.md — "Agents".
 //
@@ -12,6 +12,9 @@ import { togetherModel } from "./together.js";
 
 const SCHEMA = process.env.DB_SCHEMA ?? "prod";
 export const T = {
+  budgets: `"${SCHEMA}"."v3_budget_presets"`,
+  contexts: `"${SCHEMA}"."v3_contexts"`,
+  users: `"${SCHEMA}"."users"`,
   agents: `"${SCHEMA}"."v3_agents"`,
   chats: `"${SCHEMA}"."v3_agent_chats"`,
   messages: `"${SCHEMA}"."v3_agent_messages"`,
@@ -96,6 +99,30 @@ const SPECIALISTS = [
       "re-accommodation conditions and the schemes it excludes. Compute step by step when figures are given and show " +
       "them in a table. Questions about Table 12 slabs belong to the 30A specialist; say so rather than guessing.\n\n" + STYLE,
     context: seed("dcpr-33-7b.md"),
+  },
+  {
+    key: "reg-30a-33-7b",
+    name: "30(A) + 33(7)(B) · combined",
+    description:
+      "The 30(A) + 33(7)(B) route together: how the housing-society redevelopment incentive under 33(7)(B) tops up the " +
+      "30(A) FSI / TDR / premium stack, the interplay of the two limits, and worked totals for a given plot and existing BUA.",
+    thinking: true,
+    system_prompt:
+      `You are the combined 30(A) + 33(7)(B) specialist of the 1Cal assistant. ${DCPR}\n\n` +
+      "Your context is the text of Regulation 30 (FSI, BUA, Table 12) with the 1Cal 30(A) explainer, and the text of " +
+      "Regulation 33(7)(B) (housing-society redevelopment). Handle the combined case only: how the 33(7)(B) incentive " +
+      "BUA (15% of existing BUA or 10 sq m per tenement, whichever is more) stacks on top of the 30(A) zonal FSI, " +
+      "admissible TDR, premium FSI and fungible, and where the 30(A)(1) cap bites. Work every calculation step by step " +
+      "on the NET plot area: state the Table 12 row you used (Island City vs Suburbs, road-width slab), list each " +
+      "component as a factor AND an area in one table, add the 33(7)(B) incentive, apply the 30(A) cap, and give the " +
+      "final permissible BUA. State the assumptions (zone, existing BUA, tenements, 30-year age, exclusions). " +
+      "Questions that live entirely in 30(A) or entirely in 33(7)(B) belong to those specialists — hand them off.\n\n" + STYLE,
+    context:
+      seed("dcpr-reg-30.md") +
+      "\n\n---\n\n# Explainer: the 1Cal 30(A) model against DCPR 2034 Table 12\n\n" +
+      seed("30a-explained.md") +
+      "\n\n---\n\n# Regulation 33(7)(B) — housing societies\n\n" +
+      seed("dcpr-33-7b.md"),
   },
   {
     key: "scheme-selector",
@@ -196,6 +223,21 @@ export function agentByKey(key) {
   return AGENTS.find((a) => a.key === key) || null;
 }
 
+// Per-specialist tool allowlist. Names must exist in specialistTools.js
+// TOOL_SCHEMAS. Absence from this map == no tools (backward-compatible).
+// Kept as a plain constant, not a DB column: prompts already live in code
+// (registry.js re-seeds every boot), tools follow the same pattern.
+//
+// There is deliberately no tool that reads a sheet cell: the BE only holds
+// the raw value from the last save (stale or null for formula cells), and the
+// live number exists only in the FE's formula engine. Cell values reach the
+// agent inlined in the user message (ChatPanel enrichWithLiveCellValues →
+// 1cal:query-cells → RetemplateTwo).
+export const AGENT_TOOLS = {
+  "reg-30a-33-7b": ["list_master_inputs", "get_master_inputs", "set_master_inputs", "highlight"],
+  "report":        ["list_master_inputs", "get_master_inputs", "set_master_inputs", "highlight"],
+};
+
 // ── tables (CREATE TABLE IF NOT EXISTS, never dropped) ──────────────────────
 // Lazy and memoized, like ensureReportTables in v3Controller.js: ENSURE_TABLES
 // is off on some boxes, so the feature creates what it needs on first use.
@@ -218,6 +260,16 @@ export function ensureAgentTables() {
         content TEXT, input_tokens INT DEFAULT 0, output_tokens INT DEFAULT 0,
         reasoning_tokens INT DEFAULT 0, steps JSONB DEFAULT '[]'::jsonb, ms INT,
         created_at TIMESTAMPTZ DEFAULT NOW())`))
+    .then(() => sql.unsafe(`ALTER TABLE ${T.agents} ADD COLUMN IF NOT EXISTS disabled BOOLEAN NOT NULL DEFAULT FALSE`))
+    .then(() => sql.unsafe(`ALTER TABLE ${T.agents} ADD COLUMN IF NOT EXISTS edited BOOLEAN NOT NULL DEFAULT FALSE`))
+    .then(() => sql.unsafe(`CREATE TABLE IF NOT EXISTS ${T.contexts} (
+        id VARCHAR(24) PRIMARY KEY, name TEXT NOT NULL, description TEXT, body TEXT NOT NULL DEFAULT '',
+        created_at TIMESTAMPTZ DEFAULT NOW(), updated_at TIMESTAMPTZ DEFAULT NOW())`))
+    .then(() => sql.unsafe(`ALTER TABLE ${T.agents} ADD COLUMN IF NOT EXISTS context_ids JSONB NOT NULL DEFAULT '[]'::jsonb`))
+    .then(() => sql.unsafe(`CREATE TABLE IF NOT EXISTS ${T.budgets} (
+        id VARCHAR(24) PRIMARY KEY, name TEXT NOT NULL, data JSONB NOT NULL DEFAULT '{}'::jsonb,
+        created_at TIMESTAMPTZ DEFAULT NOW(), updated_at TIMESTAMPTZ DEFAULT NOW())`))
+    .then(() => sql.unsafe(`ALTER TABLE ${T.messages} ADD COLUMN IF NOT EXISTS cached_input_tokens INT DEFAULT 0`))
     .catch((e) => { _ensured = null; throw e; });
   return _ensured;
 }
@@ -239,7 +291,8 @@ export function seedAgents() {
              name = EXCLUDED.name, description = EXCLUDED.description, parent_key = EXCLUDED.parent_key,
              system_prompt = EXCLUDED.system_prompt, context = EXCLUDED.context, thinking = EXCLUDED.thinking,
              model = EXCLUDED.model, pos_x = EXCLUDED.pos_x, pos_y = EXCLUDED.pos_y, sort = EXCLUDED.sort,
-             updated_at = NOW()`,
+             updated_at = NOW()
+           WHERE ${T.agents}.edited IS NOT TRUE`,
           [a.key, a.name, a.description, a.parent_key, a.system_prompt, a.context, !!a.thinking, a.model,
             a.pos_x, a.pos_y, a.sort],
         );

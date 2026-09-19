@@ -107,6 +107,7 @@ function normalizeTemplate(t) {
   const out = { ...t };
   if ("input_sections" in out) out.input_sections = parseJsonbStr(out.input_sections, []);
   if ("branding" in out) out.branding = parseJsonbStr(out.branding, {});
+  if ("print_preset" in out) out.print_preset = parseJsonbStr(out.print_preset, null);
   return out;
 }
 
@@ -354,6 +355,10 @@ export async function patchTemplate(req, res) {
   if (Object.prototype.hasOwnProperty.call(b, "branding")) {
     await sql.unsafe(`ALTER TABLE ${T.v3_templates} ADD COLUMN IF NOT EXISTS branding JSONB DEFAULT '{}'::jsonb`).catch(() => {});
   }
+  // Same for the admin's print preset (created on its first save).
+  if (Object.prototype.hasOwnProperty.call(b, "print_preset")) {
+    await sql.unsafe(`ALTER TABLE ${T.v3_templates} ADD COLUMN IF NOT EXISTS print_preset JSONB`).catch(() => {});
+  }
 
   // ── page_groups is VERSION-scoped content now ──────────────────────────────
   // It no longer lives on v3_templates. Route it to the active version's row
@@ -383,6 +388,8 @@ export async function patchTemplate(req, res) {
     ["description", "description"],
     ["input_sections", "input_sections"],
     ["branding", "branding"],
+    // Admin print presets — { slots: [{ name, saved_at, pages: { [pageName]: printSettings }, selected: [pageName] } | null] } (9 slots).
+    ["print_preset", "print_preset"],
     ["disabled", "disabled"],
     // Separate from `disabled`: hidden keeps a template fully usable but out of
     // listings, where disabled switches it off entirely.
@@ -400,7 +407,7 @@ export async function patchTemplate(req, res) {
     if (Object.prototype.hasOwnProperty.call(b, key)) {
       // branding is JSONB — write it as an explicit JSON string + ::jsonb cast
       // so the driver never coerces the object into a Postgres array literal.
-      if (col === "branding") {
+      if (col === "branding" || col === "print_preset") {
         sets.push(`"${col}" = $${i}::jsonb`);
         params.push(JSON.stringify(b[key] ?? {}));
       } else {
@@ -912,9 +919,20 @@ export async function getTemplate(req, res) {
   }
 
   await ensureVerForkCol(sql);
+  // updated_at: MAX(page.updated_at) for this version's pages — the "last modified"
+  // signal that powers the version list's Modified-date sort. Falls back to
+  // created_at on the FE when no page has been touched since the version was made.
   const versionRows = await sql.unsafe(
-    `SELECT id, label, notes, author_id, created_at, forked_from_version_id, was_published, published_at FROM ${T.v3_versions}
-     WHERE template_id = $1 ORDER BY created_at ASC`,
+    `SELECT v.id, v.label, v.notes, v.author_id, v.created_at, v.forked_from_version_id,
+            v.was_published, v.published_at, pu.updated_at
+       FROM ${T.v3_versions} v
+       LEFT JOIN (
+         SELECT version_id, MAX(updated_at) AS updated_at
+           FROM ${T.v3_pages}
+          WHERE template_id = $1 AND version_id IS NOT NULL
+          GROUP BY version_id
+       ) pu ON pu.version_id = v.id
+      WHERE v.template_id = $1 ORDER BY v.created_at ASC`,
     [id],
   );
   // Attach each version's SOURCE label — the label of the version it was forked
@@ -2302,8 +2320,16 @@ export async function listVersions(req, res) {
   const sql = getSql();
   await ensureVerForkCol(sql);
   const rows = await sql.unsafe(
-    `SELECT id, label, notes, author_id, created_at, forked_from_version_id, was_published, published_at FROM ${T.v3_versions}
-     WHERE template_id = $1 ORDER BY created_at ASC`,
+    `SELECT v.id, v.label, v.notes, v.author_id, v.created_at, v.forked_from_version_id,
+            v.was_published, v.published_at, pu.updated_at
+       FROM ${T.v3_versions} v
+       LEFT JOIN (
+         SELECT version_id, MAX(updated_at) AS updated_at
+           FROM ${T.v3_pages}
+          WHERE template_id = $1 AND version_id IS NOT NULL
+          GROUP BY version_id
+       ) pu ON pu.version_id = v.id
+      WHERE v.template_id = $1 ORDER BY v.created_at ASC`,
     [req.params.id],
   );
   // Resolve each version's source label from the same result set (no JOIN).
@@ -2321,6 +2347,41 @@ export async function listVersions(req, res) {
   res.json({
     versions,
     published_version_id: tpl?.published_version_id || null,
+  });
+}
+
+// GET /v3/templates/:id/versions/:versionId/usage
+// Row-level pg_column_size aggregate for every page + master-input row that
+// belongs to this version — the "how big is this version in the DB" number
+// shown by the version list's DB-usage right-click. Bytes, not rows, because
+// the caller wants storage impact, and pg_column_size includes TOAST-compressed
+// JSONB size (not the uncompressed length). The version-diff snapshot table is
+// ignored — it's a derived cache, not part of the version's authored content.
+export async function getVersionUsage(req, res) {
+  const sql = getSql();
+  const { id: templateId, versionId } = req.params;
+  const [pagesRow] = await sql.unsafe(
+    `SELECT COALESCE(SUM(pg_column_size(p.*)), 0)::bigint AS bytes,
+            COUNT(*)::int AS rows
+       FROM ${T.v3_pages} p
+      WHERE p.template_id = $1 AND p.version_id = $2`,
+    [templateId, versionId],
+  );
+  const [miRow] = await sql.unsafe(
+    `SELECT COALESCE(SUM(pg_column_size(m.*)), 0)::bigint AS bytes,
+            COUNT(*)::int AS rows
+       FROM ${T.master_input} m
+      WHERE m.template_id = $1 AND m.version_id = $2`,
+    [templateId, versionId],
+  );
+  const pages = { bytes: Number(pagesRow?.bytes || 0), rows: Number(pagesRow?.rows || 0) };
+  const masterinput = { bytes: Number(miRow?.bytes || 0), rows: Number(miRow?.rows || 0) };
+  res.json({
+    template_id: templateId,
+    version_id: versionId,
+    pages,
+    masterinput,
+    total_bytes: pages.bytes + masterinput.bytes,
   });
 }
 
@@ -3711,7 +3772,7 @@ function requesterId(req) {
 // SELECT below would throw on a database that has not been migrated and every
 // instance write would start failing.
 let _openAccessColEnsured = false;
-async function ensureOpenAccessCol(sql) {
+export async function ensureOpenAccessCol(sql) {
   if (_openAccessColEnsured) return;
   try {
     await sql.unsafe(`ALTER TABLE ${T.v3_instances} ADD COLUMN IF NOT EXISTS open_access TEXT NOT NULL DEFAULT 'off'`);
@@ -3735,7 +3796,7 @@ async function ensureOpenAccessCol(sql) {
 // the link can already open any instance. So a "view" collaborator is a listed
 // person who is explicitly NOT an editor, rather than someone being granted
 // something they lacked.
-async function checkInstancePermission(sql, instanceId, userid) {
+export async function checkInstancePermission(sql, instanceId, userid) {
   await ensureOpenAccessCol(sql);
   const [inst] = await sql.unsafe(
     `SELECT id, user_id, collaborators, open_access FROM ${T.v3_instances} WHERE id = $1 LIMIT 1`,
@@ -4133,6 +4194,7 @@ export async function getInstance(req, res) {
       description: tpl.description,
       input_sections: parseJsonbStr(tpl.input_sections, []),
       branding: parseJsonbStr(tpl.branding, {}),
+      print_preset: parseJsonbStr(tpl.print_preset, null),
       published_version_id: tpl.published_version_id,
     } : null,
     pages: visiblePages.map(normalizePage),

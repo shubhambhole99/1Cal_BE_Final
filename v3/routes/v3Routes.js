@@ -18,6 +18,7 @@ router.get("/templates/:id/master-inputs", ctrl.getMasterInputs);
 
 // Version control
 router.get("/templates/:id/versions", ctrl.listVersions);
+router.get("/templates/:id/versions/:versionId/usage", ctrl.getVersionUsage);
 router.post("/templates/:id/versions", ctrl.createVersion);
 router.post("/templates/:id/versions/:targetVersionId/restore", ctrl.restoreVersion);
 router.patch("/templates/:id/versions/:versionId", ctrl.patchVersion);
