@@ -5,7 +5,7 @@
 // (to read the agents), the chat function (together.js), the history and the
 // new message, and returns the Markdown answer with one step per model call.
 
-import { T, AGENTS, SPECIALIST_KEYS, AGENT_TOOLS } from "./registry.js";
+import { T, AGENTS, SPECIALIST_KEYS, AGENT_TOOLS, PROJECT_AGENT_KEYS } from "./registry.js";
 import { TOOL_SCHEMAS, runTool } from "./specialistTools.js";
 
 const MAX_ROUNDS = 3;            // consult rounds; the last compose keeps the tools array with tool_choice "none"
@@ -41,7 +41,7 @@ async function loadAgents(sql) {
   const main = byKey.get("main") || AGENTS[0];
   const specialists = list.filter((a) => a.key !== "main" && !a.disabled
     && (a.parent_key === "main" || SPECIALIST_KEYS.includes(a.key)));
-  return { main, specialists, byKey };
+  return { main, specialists };
 }
 
 // Append each agent's attached library documents to its context.
@@ -109,14 +109,16 @@ const clip = (s, n) => (s.length > n ? `${s.slice(0, n)}\n…[truncated at ${n.t
 // specialist has something to say. Only the count goes in: the report and
 // calculation names come from the browser and would otherwise become text
 // inside the system prompt. Names and numbers stay with `report`, as data.
-function openReportNote(rc) {
+function openReportNote(rc, hasReportAgent) {
   if (!rc || typeof rc !== "object") return "";
   const calcs = Array.isArray(rc.calcs) ? rc.calcs : [];
   return (
     "\n\n# Open report\n" +
     `The user has a report open in 1Cal with ${calcs.length} calculation(s). ` +
-    "The `report` specialist holds its name, numbers, summary rows and master inputs; " +
-    "consult it for anything about this project, its calculations or the figures on screen."
+    (hasReportAgent
+      ? "The `report` specialist holds its name, numbers, summary rows and master inputs; " +
+        "consult it for anything about this project, its calculations or the figures on screen."
+      : "Consult the project specialist for anything about this project or the figures on screen.")
   );
 }
 
@@ -199,12 +201,20 @@ function parseArgs(tc) {
  */
 export async function run({ sql, chat, history, userMessage, reportContext, scope = null }) {
   const t0 = Date.now();
-  const { main, specialists, byKey } = await loadAgents(sql);
+  const { main, specialists: allSpecialists } = await loadAgents(sql);
+  // A chat on a report follows the Project-mode tree: Main (the Project agent)
+  // may consult only the specialists attached to the project. If none of them
+  // is enabled it falls back to the global tree, so there is always someone to ask.
+  const projectSpecialists = scope?.instanceId
+    ? allSpecialists.filter((a) => PROJECT_AGENT_KEYS.includes(a.key))
+    : [];
+  const specialists = projectSpecialists.length ? projectSpecialists : allSpecialists;
   const tools = [askAgentTool(specialists)];
   const steps = [];
+  const hasReportAgent = specialists.some((a) => a.key === "report");
 
   const messages = [
-    { role: "system", content: `${main.system_prompt || ""}\n\n${main.context || ""}${openReportNote(reportContext)}` },
+    { role: "system", content: `${main.system_prompt || ""}\n\n${main.context || ""}${openReportNote(reportContext, hasReportAgent)}` },
     ...cleanHistory(history),
     { role: "user", content: String(userMessage) },
   ];
@@ -234,7 +244,8 @@ export async function run({ sql, chat, history, userMessage, reportContext, scop
     const args = parseArgs(tc);
     const key = String(args?.agent || "");
     const question = frame(String(args?.question || "").trim());
-    const agent = key !== "main" ? byKey.get(key) : null;
+    // Only a specialist in this chat's tree can be consulted.
+    const agent = specialists.find((a) => a.key === key) || null;
     if (!args || !agent || !question) {
       const msg = !agent
         ? `Unknown agent "${key}". Available: ${specialists.map((a) => a.key).join(", ")}.`

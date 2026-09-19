@@ -45,7 +45,7 @@ function errorMessage(status, text) {
 
 /**
  * chat({ messages, tools, tool_choice, max_tokens, temperature, thinking, json, model })
- *   thinking (boolean) → chat_template_kwargs.enable_thinking
+ *   thinking (boolean) → chat_template_kwargs.enable_thinking (+ reasoning_effort "low" when false)
  *   json (boolean)     → response_format { type: "json_object" }
  * Returns { content, reasoning, toolCalls, finish, usage: { input, output, reasoning, cached }, ms }.
  *   usage.cached is how many of the input tokens came from Together's prompt cache — the
@@ -83,6 +83,12 @@ export async function chat(options = {}) {
   }
   if (typeof thinking === "boolean") {
     body.chat_template_kwargs = { enable_thinking: thinking };
+    // Models on Together don't share one off switch: Ternary Bonsai (Qwen
+    // template) obeys enable_thinking and goes to 0 reasoning tokens. GLM-5.3
+    // ignores it and every other off switch (reasoning_effort none/minimal,
+    // reasoning.enabled, thinking.type — probed); "low" is its floor, roughly
+    // 50–130 reasoning tokens a call instead of thousands.
+    if (!thinking) body.reasoning_effort = "low";
   }
   if (json) body.response_format = { type: "json_object" };
 

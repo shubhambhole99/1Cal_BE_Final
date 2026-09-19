@@ -233,6 +233,12 @@ export function agentByKey(key) {
 // live number exists only in the FE's formula engine. Cell values reach the
 // agent inlined in the user message (ChatPanel enrichWithLiveCellValues →
 // 1cal:query-cells → RetemplateTwo).
+// The Project agent's specialists — the "Diagram in Project mode" tree. A chat
+// on a report routes ONLY to these; the global tree (every specialist) is for
+// the home-page chat. One list: the orchestrator routes with it and the admin
+// diagram reads it from GET /v3/agents (project_keys).
+export const PROJECT_AGENT_KEYS = ["reg-30a-33-7b"];
+
 export const AGENT_TOOLS = {
   "reg-30a-33-7b": ["list_master_inputs", "get_master_inputs", "set_master_inputs", "highlight"],
   "report":        ["list_master_inputs", "get_master_inputs", "set_master_inputs", "highlight"],

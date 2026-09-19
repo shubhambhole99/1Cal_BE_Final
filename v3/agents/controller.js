@@ -7,7 +7,7 @@ import { getSql } from "../db/index.js";
 import { newObjectId } from "../utils/objectId.js";
 import { verifiedUserId, V3_AUTH_STRICT } from "../middleware/v3Auth.js";
 import { chat as togetherChat } from "./together.js";
-import { T, ready, agentByKey } from "./registry.js";
+import { T, ready, agentByKey, PROJECT_AGENT_KEYS } from "./registry.js";
 import { run } from "./orchestrator.js";
 
 const HISTORY_LIMIT = 20;
@@ -322,7 +322,7 @@ export async function listAgents(_req, res) {
               COALESCE(length(context), 0)::int AS context_chars
          FROM ${T.agents} ORDER BY sort ASC, key ASC`,
     );
-    res.json({ agents });
+    res.json({ agents, project_keys: PROJECT_AGENT_KEYS });
   } catch (e) {
     fail(res, e, "listAgents");
   }
