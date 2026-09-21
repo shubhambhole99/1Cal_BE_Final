@@ -2294,8 +2294,9 @@ async function ensureVerForkCol(sql) {
     await sql.unsafe(`ALTER TABLE ${T.v3_versions} ADD COLUMN IF NOT EXISTS was_published BOOLEAN NOT NULL DEFAULT FALSE`);
     await sql.unsafe(`ALTER TABLE ${T.v3_versions} ADD COLUMN IF NOT EXISTS published_at TIMESTAMPTZ`);
     // Backfill from the pre-flag data: every template's CURRENT published version,
-    // plus any legacy "ex-published ·…" labelled snapshots (the old name-based
-    // heuristic), become was_published so history stays correct.
+    // plus any snapshot labelled by the old name-based heuristic ("Past
+    // release ·…", or "ex-published ·…" as it was called), become was_published
+    // so history stays correct.
     await sql.unsafe(
       `UPDATE ${T.v3_versions} v SET was_published = TRUE
          FROM ${T.v3_templates} t
@@ -2303,7 +2304,16 @@ async function ensureVerForkCol(sql) {
     );
     await sql.unsafe(
       `UPDATE ${T.v3_versions} SET was_published = TRUE
-        WHERE was_published = FALSE AND label ILIKE 'ex-published%'`,
+        WHERE was_published = FALSE
+          AND (label ILIKE 'past release%' OR label ILIKE 'ex-published%')`,
+    );
+    // These snapshots used to be labelled "ex-published · …"; the name reads
+    // badly in the version list, so old rows are renamed in place to match the
+    // "Past release · …" the code writes now. Only the prefix changes.
+    await sql.unsafe(
+      `UPDATE ${T.v3_versions}
+          SET label = regexp_replace(label, '^\s*ex-published', 'Past release', 'i')
+        WHERE label ILIKE 'ex-published%'`,
     );
     // Pre-flag locked versions have no recorded publish date — approximate it
     // with created_at so "Last published" shows something sensible instead of
@@ -2818,7 +2828,7 @@ export async function publishVersion(req, res) {
           version_id,
         ]);
       }
-      // Mark the previously-published version as "ex-published" so it stays
+      // Mark the previously-published version as a "Past release" so it stays
       // identifiable in the version history / "Previously published" filter,
       // consistent with Push to Publish. Publishing doesn't destroy it — it
       // survives intact, just re-labelled and no longer the live version.
@@ -2828,10 +2838,10 @@ export async function publishVersion(req, res) {
           [oldPublishedId],
         );
         const oldLabel = (old?.label && String(old.label).trim()) || oldPublishedId.slice(0, 8);
-        if (!/^\s*ex-published/i.test(oldLabel)) {
+        if (!/^\s*(past release|ex-published)/i.test(oldLabel)) {
           await tx.unsafe(
             `UPDATE ${T.v3_versions} SET label = $1 WHERE id = $2`,
-            [`ex-published · ${oldLabel} · ${new Date().toISOString().slice(0, 10)}`, oldPublishedId],
+            [`Past release · ${oldLabel} · ${new Date().toISOString().slice(0, 10)}`, oldPublishedId],
           );
         }
       }
@@ -3133,7 +3143,7 @@ export async function promoteToPublished(req, res) {
     // makes the target mirror the source: whatever the source no longer has is
     // removed from the target too. Opt-in, so a selective one-page promote can
     // never delete anything. Safe because Push to Publish snapshots the current
-    // published content into an "ex-published" version first.
+    // published content into a "Past release" version first.
     if (b.deleteMissing) {
       // Pages present in the target but gone from the source.
       const stalePages = await sql.unsafe(
@@ -3341,14 +3351,14 @@ export async function pushToPublished(req, res) {
 
   // Snapshot the CURRENT published version before Push overwrites its content,
   // so the pre-push published state is never lost. Fatal on failure — we never
-  // overwrite the live version without a preserved "ex-published" backup.
+  // overwrite the live version without a preserved "Past release" backup.
   try {
     const [pub] = await sql.unsafe(
       `SELECT label, published_at FROM ${T.v3_versions} WHERE id = $1 LIMIT 1`,
       [targetVersionId],
     );
     const oldLabel = (pub?.label && String(pub.label).trim()) || targetVersionId.slice(0, 8);
-    const snapLabel = `ex-published · ${oldLabel} · ${new Date().toISOString().slice(0, 10)}`;
+    const snapLabel = `Past release · ${oldLabel} · ${new Date().toISOString().slice(0, 10)}`;
     const snapId = newObjectId();
     await ensureVerForkCol(sql);
     await sql.begin(async (tx) => {
@@ -3385,7 +3395,7 @@ export async function pushToPublished(req, res) {
   // Delegate to the existing, tested promote path with the full lists.
   // deleteMissing makes the published version MIRROR the source: pages,
   // sections and loose inputs deleted in the draft are removed from published
-  // instead of lingering there forever. The ex-published snapshot taken above
+  // instead of lingering there forever. The Past release snapshot taken above
   // still holds the pre-push content.
   req.body = { sourceVersionId, targetVersionId, pages, sections, masterInputs, deleteMissing: true };
   return promoteToPublished(req, res);
