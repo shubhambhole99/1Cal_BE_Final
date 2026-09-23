@@ -30,6 +30,9 @@ const T = {
   users: `"${SCHEMA}"."users"`,
   mi: `"${SCHEMA}"."v3_master_input"`,
   imi: `"${SCHEMA}"."v3_instance_master_input"`,
+  versions: `"${SCHEMA}"."v3_versions"`,
+  templates: `"${SCHEMA}"."v3_templates"`,
+  verGrants: `"${SCHEMA}"."v3_version_grants"`,
 };
 
 export const PAYWALL_ENABLED = String(process.env.PAYWALL_ENABLED || "").toLowerCase() === "true";
@@ -74,6 +77,138 @@ export async function canViewAllVersions(sql, req, userId) {
       `SELECT can_view_all_versions FROM ${T.users} WHERE id = $1 LIMIT 1`, [userId]);
     return u?.can_view_all_versions === true;
   } catch { return false; }
+}
+
+/**
+ * Per-version access.
+ *
+ * `users.can_view_all_versions` is all-or-nothing: it opens every unpublished
+ * version of every scheme. This is the same power named one version at a time,
+ * so a reviewer can be shown the one draft they are reviewing and nothing else.
+ * The two stack — the blanket flag wins wherever it is set.
+ */
+let _verGrantTableEnsured = false;
+export async function ensureVersionGrantTable(sql) {
+  if (_verGrantTableEnsured) return;
+  await sql.unsafe(
+    `CREATE TABLE IF NOT EXISTS ${T.verGrants} (
+       user_id    VARCHAR(24) NOT NULL,
+       version_id VARCHAR(24) NOT NULL,
+       granted_by VARCHAR(24),
+       created_at TIMESTAMPTZ DEFAULT NOW(),
+       PRIMARY KEY (user_id, version_id)
+     )`,
+  );
+  _verGrantTableEnsured = true;
+}
+
+/** The version ids this user was granted one by one. Never throws. */
+export async function grantedVersionIds(sql, userId) {
+  if (!userId) return new Set();
+  try {
+    await ensureVersionGrantTable(sql);
+    const rows = await sql.unsafe(
+      `SELECT version_id FROM ${T.verGrants} WHERE user_id = $1`, [userId]);
+    return new Set(rows.map((r) => r.version_id));
+  } catch { return new Set(); }
+}
+
+/** GET /v3/version-grants/:userId — which versions this user may open. */
+export async function getVersionGrants(req, res) {
+  const sql = getSql();
+  try {
+    if (!(await isAdminUser(sql, req, verifiedUserId(req)))) {
+      return res.status(403).json({ error: "Admins only." });
+    }
+    const ids = await grantedVersionIds(sql, String(req.params.userId));
+    res.json({ versionIds: [...ids] });
+  } catch (e) {
+    res.status(500).json({ error: String(e.message || e) });
+  }
+}
+
+/** PUT /v3/version-grants/:userId — replace the set in one call. */
+export async function setVersionGrants(req, res) {
+  const sql = getSql();
+  try {
+    const actor = verifiedUserId(req);
+    if (!(await isAdminUser(sql, req, actor))) {
+      return res.status(403).json({ error: "Admins only." });
+    }
+    const userId = String(req.params.userId);
+    const wanted = Array.isArray(req.body?.versionIds)
+      ? [...new Set(req.body.versionIds.map((v) => String(v)).filter(Boolean))]
+      : null;
+    if (!wanted) return res.status(400).json({ error: "versionIds array required" });
+
+    // Only ids that are really versions — a stale id from the picker would
+    // otherwise sit in the table for ever, granting nothing and explaining
+    // nothing.
+    const real = wanted.length
+      ? (await sql.unsafe(
+        `SELECT id FROM ${T.versions} WHERE id = ANY($1::text[])`, [wanted])).map((r) => r.id)
+      : [];
+
+    await ensureVersionGrantTable(sql);
+    await sql.unsafe(`DELETE FROM ${T.verGrants} WHERE user_id = $1`, [userId]);
+    for (const vid of real) {
+      await sql.unsafe(
+        `INSERT INTO ${T.verGrants} (user_id, version_id, granted_by)
+         VALUES ($1,$2,$3) ON CONFLICT DO NOTHING`,
+        [userId, vid, actor],
+      );
+    }
+    res.json({ versionIds: real, skipped: wanted.filter((v) => !real.includes(v)) });
+  } catch (e) {
+    res.status(500).json({ error: String(e.message || e) });
+  }
+}
+
+/**
+ * GET /v3/version-catalogue — every template with its versions, for the picker.
+ *
+ * One call rather than 47: the admin screen needs the whole tree to show what
+ * it is granting, and the rows are small.
+ */
+export async function getVersionCatalogue(req, res) {
+  const sql = getSql();
+  try {
+    if (!(await isAdminUser(sql, req, verifiedUserId(req)))) {
+      return res.status(403).json({ error: "Admins only." });
+    }
+    const rows = await sql.unsafe(
+      `SELECT v.id, v.label, v.template_id, v.was_published, v.published_at, v.created_at,
+              t.name AS template_name, t.published_version_id, pu.updated_at
+         FROM ${T.versions} v
+         JOIN ${T.templates} t ON t.id = v.template_id
+         LEFT JOIN (
+           SELECT version_id, MAX(updated_at) AS updated_at
+             FROM "${SCHEMA}"."v3_pages"
+            WHERE version_id IS NOT NULL
+            GROUP BY version_id
+         ) pu ON pu.version_id = v.id
+        ORDER BY t.name ASC, v.created_at ASC`,
+    );
+    const byTemplate = new Map();
+    for (const r of rows) {
+      if (!byTemplate.has(r.template_id)) {
+        byTemplate.set(r.template_id, {
+          template_id: r.template_id, template_name: r.template_name,
+          published_version_id: r.published_version_id, versions: [],
+        });
+      }
+      const isPublished = r.id === r.published_version_id;
+      byTemplate.get(r.template_id).versions.push({
+        id: r.id, label: r.label, was_published: r.was_published === true,
+        published_at: r.published_at, created_at: r.created_at, updated_at: r.updated_at,
+        is_published: isPublished,
+        is_draft: r.was_published !== true && !isPublished,
+      });
+    }
+    res.json({ templates: [...byTemplate.values()] });
+  } catch (e) {
+    res.status(500).json({ error: String(e.message || e) });
+  }
 }
 
 /** { unlimited, balance, granted, consumed } for a user. */

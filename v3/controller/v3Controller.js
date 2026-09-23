@@ -5,7 +5,7 @@ import { broadcast } from "../lib/events.js";
 import { verifiedUserId, V3_AUTH_STRICT } from "../middleware/v3Auth.js";
 import {
   canReadLockedPages, entitlementSummary, guardOneTimeInput,
-  PAYWALL_ENABLED, PLOT_AREA_KEY, CREDIT_PRICE_INR, isAdminUser, canViewAllVersions,
+  PAYWALL_ENABLED, PLOT_AREA_KEY, CREDIT_PRICE_INR, isAdminUser, canViewAllVersions, grantedVersionIds,
 } from "./entitlementsController.js";
 import {
   COLLAB_ROLES, OPEN_ACCESS, normaliseCollaborators, collaboratorRole,
@@ -4019,9 +4019,13 @@ export async function getInstance(req, res) {
   // Drafts open up for admins and for anyone holding the per-user grant, so a
   // reviewer can be pointed at an unreleased scheme without admin rights.
   const viewerSeesDrafts = viewerIsAdmin || (await canViewAllVersions(sql, req, viewerId));
+  // Past the blanket flag, a viewer may hold named versions. Those open exactly
+  // like a published one — for that version and no other.
+  const viewerGrants = viewerSeesDrafts ? new Set() : await grantedVersionIds(sql, viewerId);
   const versionId = await resolveInstanceVersion(sql, {
     versionPin: inst.version_id, pinnedAt: inst.pinned_at, templateId: inst.template_id,
-    publishedVersionId: tpl?.published_version_id, viewerSeesDrafts,
+    publishedVersionId: tpl?.published_version_id,
+    viewerSeesDrafts: viewerSeesDrafts || (!!inst.version_id && viewerGrants.has(inst.version_id)),
   });
 
   const pages = await sql.unsafe(
@@ -4177,19 +4181,31 @@ export async function getInstance(req, res) {
   let switchableVersions = [];
   try {
     const allVersions = await sql.unsafe(
-      `SELECT id, label, was_published, published_at, created_at
-         FROM ${T.v3_versions} WHERE template_id = $1 ORDER BY created_at ASC`,
+      `SELECT v.id, v.label, v.was_published, v.published_at, v.created_at,
+              pu.updated_at
+         FROM ${T.v3_versions} v
+         LEFT JOIN (
+           SELECT version_id, MAX(updated_at) AS updated_at
+             FROM ${T.v3_pages}
+            WHERE template_id = $1 AND version_id IS NOT NULL
+            GROUP BY version_id
+         ) pu ON pu.version_id = v.id
+        WHERE v.template_id = $1 ORDER BY v.created_at ASC`,
       [inst.template_id],
     );
     const publishedId = tpl?.published_version_id || null;
     switchableVersions = allVersions
-      .filter((v) => viewerSeesDrafts || v.was_published === true || v.id === publishedId)
+      .filter((v) => viewerSeesDrafts || v.was_published === true || v.id === publishedId
+        || viewerGrants.has(v.id))
       .map((v) => ({
         id: v.id,
         label: v.label,
         was_published: v.was_published === true,
         published_at: v.published_at,
         created_at: v.created_at,
+        // When this version's content was last touched — what the report's
+        // version picker shows.
+        updated_at: v.updated_at,
         is_published: v.id === publishedId,
         is_draft: v.was_published !== true && v.id !== publishedId,
       }));
@@ -4318,6 +4334,7 @@ export async function changeInstanceVersion(req, res) {
   // for everyone but an admin, so a granted user can switch versions on reports
   // they can already open, and no others.
   const seesDrafts = admin || (await canViewAllVersions(sql, req, uid));
+  const versionGrants = seesDrafts ? new Set() : await grantedVersionIds(sql, uid);
   const perm = await checkInstancePermission(sql, id, uid);
   if (!perm.ok && !admin) return res.status(perm.status || 403).json({ error: perm.error || "Not allowed" });
 
@@ -4340,7 +4357,7 @@ export async function changeInstanceVersion(req, res) {
       `SELECT published_version_id FROM ${T.v3_templates} WHERE id = $1 LIMIT 1`, [inst.template_id],
     );
     const isDraft = ver.was_published !== true && ver.id !== (tpl?.published_version_id || null);
-    if (isDraft && !seesDrafts) {
+    if (isDraft && !seesDrafts && !versionGrants.has(targetVersionId)) {
       return res.status(403).json({ error: "You are not allowed to switch this report to an unpublished draft version." });
     }
     // Refuse a version with no report pages — it would render a blank report.
@@ -4501,9 +4518,13 @@ export async function getInstanceMasterInputs(req, res) {
   // falls back to published) — see resolveInstanceVersion / getInstance.
   const miViewerId = verifiedUserId(req);
   const miSeesDrafts = await canViewAllVersions(sql, req, miViewerId);
+  // Same rule as getInstance, or the sheet would render from the pinned draft
+  // while its inputs came from published.
+  const miGrants = miSeesDrafts ? new Set() : await grantedVersionIds(sql, miViewerId);
   const miVersionId = await resolveInstanceVersion(sql, {
     versionPin: inst.version_id, pinnedAt: inst.pinned_at, templateId: inst.template_id,
-    publishedVersionId: inst.published_version_id, viewerSeesDrafts: miSeesDrafts,
+    publishedVersionId: inst.published_version_id,
+    viewerSeesDrafts: miSeesDrafts || (!!inst.version_id && miGrants.has(inst.version_id)),
   });
   const rows = await sql.unsafe(
     `SELECT

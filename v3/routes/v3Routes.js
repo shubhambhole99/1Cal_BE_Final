@@ -164,4 +164,10 @@ router.post("/entitlements/revoke", ent.revokeEntitlement);
 router.post("/entitlements/summaries", ent.bulkEntitlementSummaries);
 router.get("/entitlements/:userId", ent.getUserEntitlement);
 
+// Per-version access grants (admin). The catalogue feeds the picker; the two
+// grant routes read and replace one user's set.
+router.get("/version-catalogue", ent.getVersionCatalogue);
+router.get("/version-grants/:userId", ent.getVersionGrants);
+router.put("/version-grants/:userId", ent.setVersionGrants);
+
 export default router;
