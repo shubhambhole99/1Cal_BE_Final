@@ -20,6 +20,9 @@ export const users = finalSchema.table("users", {
   // Separate from role on purpose: it lets someone be shown a draft scheme
   // without being handed the admin panel with it. Off for everyone by default.
   canViewAllVersions: boolean("can_view_all_versions").default(false),
+  // Per-user gate: when true, this user sees "Download Excel (with formulas)" in
+  // an instance's Print tab. Admins always see it; off for everyone else by default.
+  canDownloadExcelFormulas: boolean("can_download_excel_formulas").default(false),
   phoneCountryCode: varchar("phone_country_code", { length: 16 }),
   phoneNumber: varchar("phone_number", { length: 32 }),
   firstName: text("first_name"),

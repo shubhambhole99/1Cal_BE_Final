@@ -49,7 +49,10 @@ export function ensureUserGrantCols() {
   const schema = process.env.DB_SCHEMA ?? "final";
   const ref = schema === "public" ? '"users"' : `"${schema}"."users"`;
   _userGrantCols = db
-    .execute(sql.raw(`ALTER TABLE ${ref} ADD COLUMN IF NOT EXISTS "can_view_all_versions" boolean DEFAULT false`))
+    .execute(sql.raw(
+      `ALTER TABLE ${ref} ADD COLUMN IF NOT EXISTS "can_view_all_versions" boolean DEFAULT false, ` +
+      `ADD COLUMN IF NOT EXISTS "can_download_excel_formulas" boolean DEFAULT false`
+    ))
     .catch((e) => { _userGrantCols = null; throw e; });
   return _userGrantCols;
 }
