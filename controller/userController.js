@@ -50,13 +50,21 @@ export function ensureUserGrantCols() {
   const ref = schema === "public" ? '"users"' : `"${schema}"."users"`;
   // Every column added to schema/users.js must self-heal here, or the next
   // SELECT (which lists all schema columns) 500s on a DB that hasn't seen it.
-  _userGrantCols = db
-    .execute(sql.raw(
+  _userGrantCols = (async () => {
+    await db.execute(sql.raw(
       `ALTER TABLE ${ref} ADD COLUMN IF NOT EXISTS "can_view_all_versions" boolean DEFAULT false, ` +
       `ADD COLUMN IF NOT EXISTS "can_download_excel_formulas" boolean DEFAULT false, ` +
       `ADD COLUMN IF NOT EXISTS "credentials_set" boolean DEFAULT false`
-    ))
-    .catch((e) => { _userGrantCols = null; throw e; });
+    ));
+    // Backfill: anyone whose email is NOT an OTP placeholder (createUser mints
+    // "<digits>@gmail.com") already has real credentials, so they must not be
+    // nagged by the login-time modal. Only placeholder-email users (OTP, never
+    // set) stay false. Idempotent — only flips false→true for real emails.
+    await db.execute(sql.raw(
+      `UPDATE ${ref} SET "credentials_set" = true ` +
+      `WHERE "credentials_set" = false AND "email" !~ '^[0-9]+@gmail[.]com$'`
+    ));
+  })().catch((e) => { _userGrantCols = null; throw e; });
   return _userGrantCols;
 }
 
