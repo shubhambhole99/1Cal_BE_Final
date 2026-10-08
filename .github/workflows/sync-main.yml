@@ -1,0 +1,62 @@
+name: Sync main from main-dev
+
+# On any push to main-dev (by ANY account), the github-actions bot opens — or
+# refreshes — a pull request from main-dev into main. Because the bot opens it,
+# this works no matter which account pushed to main-dev.
+#
+# Merging that PR is a deliberate step left to a maintainer (one click). The
+# merge commit on main is what triggers the Vercel PRODUCTION deploy; Vercel
+# also builds a PREVIEW for the open PR automatically. Keeping the merge manual
+# is the review gate before code reaches production.
+#
+# If you want it to merge (and deploy to prod) with no human step, enable
+# GitHub's native auto-merge on the repo and add `gh pr merge --auto --merge`
+# after the create step — do that knowingly, since it ships to prod unreviewed.
+
+on:
+  push:
+    branches: [main-dev]
+  workflow_dispatch:
+
+# The built-in GITHUB_TOKEN needs this to open the PR. (Requires repo setting:
+# Settings > Actions > General > Workflow permissions > "Read and write
+# permissions" AND "Allow GitHub Actions to create and approve pull requests".)
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: sync-main
+  cancel-in-progress: false
+
+jobs:
+  open-pr:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout full history
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Open or refresh PR main-dev -> main
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          git fetch origin main main-dev
+
+          # Nothing to open if main already contains every main-dev commit.
+          if git merge-base --is-ancestor origin/main-dev origin/main; then
+            echo "main already up to date with main-dev - nothing to open."
+            exit 0
+          fi
+
+          # Reuse an open PR if one exists, otherwise open one.
+          existing="$(gh pr list --base main --head main-dev --state open --json number --jq '.[0].number // empty')"
+          if [ -z "$existing" ]; then
+            gh pr create --base main --head main-dev \
+              --title "Sync: main-dev -> main" \
+              --body "Automated by CI on push to main-dev. Review and merge to deploy to production (Vercel). Opened by github-actions[bot], so it works no matter which account pushed to main-dev."
+          else
+            echo "PR #$existing already open for main-dev -> main; left as is."
+          fi
