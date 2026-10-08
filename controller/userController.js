@@ -53,6 +53,14 @@ export function ensureUserGrantCols() {
   _userGrantCols = (async () => {
     await db.execute(sql.raw(`ALTER TABLE ${ref} ADD COLUMN IF NOT EXISTS "can_view_all_versions" boolean DEFAULT false`));
     await db.execute(sql.raw(`ALTER TABLE ${ref} ADD COLUMN IF NOT EXISTS "credentials_set" boolean DEFAULT false`));
+    // Backfill: anyone whose email is NOT an OTP placeholder (createUser mints
+    // "<digits>@gmail.com") already has real credentials, so they must not be
+    // nagged by the login-time modal. Only placeholder-email users (OTP, never
+    // set) stay false. Idempotent — only flips false→true for real emails.
+    await db.execute(sql.raw(
+      `UPDATE ${ref} SET "credentials_set" = true ` +
+      `WHERE "credentials_set" = false AND "email" !~ '^[0-9]+@gmail[.]com$'`
+    ));
   })().catch((e) => { _userGrantCols = null; throw e; });
   return _userGrantCols;
 }
