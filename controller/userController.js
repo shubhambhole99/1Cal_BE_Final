@@ -1,7 +1,7 @@
 import bcrypt from "bcrypt";
 import jwt from "jsonwebtoken";
 import https from "https";
-import { and, asc, desc, eq, ilike, or, sql } from "drizzle-orm";
+import { and, asc, desc, eq, ilike, ne, or, sql } from "drizzle-orm";
 import { db } from "../db/index.js";
 import { users } from "../schema/users.js";
 import { newObjectId } from "../utils/objectId.js";
@@ -48,10 +48,13 @@ export function ensureUserGrantCols() {
   if (_userGrantCols) return _userGrantCols;
   const schema = process.env.DB_SCHEMA ?? "final";
   const ref = schema === "public" ? '"users"' : `"${schema}"."users"`;
+  // Every column added to schema/users.js must self-heal here, or the next
+  // SELECT (which lists all schema columns) 500s on a DB that hasn't seen it.
   _userGrantCols = db
     .execute(sql.raw(
       `ALTER TABLE ${ref} ADD COLUMN IF NOT EXISTS "can_view_all_versions" boolean DEFAULT false, ` +
-      `ADD COLUMN IF NOT EXISTS "can_download_excel_formulas" boolean DEFAULT false`
+      `ADD COLUMN IF NOT EXISTS "can_download_excel_formulas" boolean DEFAULT false, ` +
+      `ADD COLUMN IF NOT EXISTS "credentials_set" boolean DEFAULT false`
     ))
     .catch((e) => { _userGrantCols = null; throw e; });
   return _userGrantCols;
@@ -65,6 +68,9 @@ function toUserResponse(row) {
     first_name: row.firstName ?? row.first_name ?? null,
     last_name: row.lastName ?? row.last_name ?? null,
     phone_number: row.phoneNumber ?? row.phone_number ?? null,
+    // Drives the login-time "set email & password" modal on the FE.
+    credentialsSet: row.credentialsSet === true,
+    credentials_set: row.credentialsSet === true,
   };
 }
 
@@ -315,6 +321,49 @@ export async function resetPassword(req, res) {
   }
 }
 
+// Self-service: the logged-in user sets their OWN email + password. This is the
+// fallback sign-in the login-time modal provisions, for when phone OTP fails.
+// Authenticated (isAuthenticated) and scoped to req.user — a user can only ever
+// set their own credentials, never another's (unlike the open PUT /user/:id).
+const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+const MIN_PASSWORD_LEN = 6;
+
+export async function setMyCredentials(req, res) {
+  const userId = req.user?.userId ?? req.user?.id;
+  if (!userId) return res.status(401).json({ error: "Not authenticated." });
+
+  const email = String(req.body?.email ?? "").trim().toLowerCase();
+  const password = String(req.body?.password ?? "");
+
+  if (!EMAIL_RE.test(email)) return res.status(400).json({ error: "Enter a valid email address." });
+  if (password.length < MIN_PASSWORD_LEN) {
+    return res.status(400).json({ error: `Password must be at least ${MIN_PASSWORD_LEN} characters.` });
+  }
+
+  try {
+    // email is unique+notNull — reject if another account already uses it.
+    const [clash] = await db
+      .select({ id: users.id })
+      .from(users)
+      .where(and(eq(users.email, email), ne(users.id, userId)))
+      .limit(1);
+    if (clash) return res.status(409).json({ error: "That email is already in use." });
+
+    const hashed = await bcrypt.hash(password, 10);
+    const [updated] = await db
+      .update(users)
+      .set({ email, password: hashed, credentialsSet: true })
+      .where(eq(users.id, userId))
+      .returning();
+
+    if (!updated) return res.status(404).json({ error: "User not found." });
+    res.json({ message: "Credentials set successfully.", user: toUserResponse(updated) });
+  } catch (error) {
+    console.error("[PUT /api/user/me/credentials] Error:", error);
+    res.status(500).json({ error: error.message });
+  }
+}
+
 export async function getUserById(req, res) {
   const id = req.params.id;
   try {
@@ -330,7 +379,12 @@ export async function getUserById(req, res) {
 export async function updateUser(req, res) {
   const id = req.params.id;
   const newData = { ...req.body };
-  if (newData.password) newData.password = await bcrypt.hash(newData.password, 10);
+  if (newData.password) {
+    newData.password = await bcrypt.hash(newData.password, 10);
+    // An admin setting a real password is the user "having credentials" — it
+    // clears the login-time modal for them, same as self-service.
+    newData.credentialsSet = true;
+  }
   normalizeTimestampFields(newData, ["actualCreatedAt"]);
   try {
     const [updated] = await db.update(users).set(newData).where(eq(users.id, id)).returning();

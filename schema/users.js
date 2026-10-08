@@ -23,6 +23,11 @@ export const users = finalSchema.table("users", {
   // Per-user gate: when true, this user sees "Download Excel (with formulas)" in
   // an instance's Print tab. Admins always see it; off for everyone else by default.
   canDownloadExcelFormulas: boolean("can_download_excel_formulas").default(false),
+  // True once the user has set a real email + password (via the self-service
+  // credentials modal or an admin). OTP-created users start false — their email
+  // and password are placeholders — so the login-time modal forces them to set
+  // real ones before using the app. See setMyCredentials / updateUser.
+  credentialsSet: boolean("credentials_set").default(false),
   phoneCountryCode: varchar("phone_country_code", { length: 16 }),
   phoneNumber: varchar("phone_number", { length: 32 }),
   firstName: text("first_name"),
