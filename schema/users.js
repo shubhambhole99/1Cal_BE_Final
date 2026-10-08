@@ -20,6 +20,11 @@ export const users = finalSchema.table("users", {
   // Separate from role on purpose: it lets someone be shown a draft scheme
   // without being handed the admin panel with it. Off for everyone by default.
   canViewAllVersions: boolean("can_view_all_versions").default(false),
+  // True once the user has set a real email + password (via the self-service
+  // credentials modal or an admin). OTP-created users start false — their email
+  // and password are placeholders — so the login-time modal forces them to set
+  // real ones before using the app. See setMyCredentials / updateUser.
+  credentialsSet: boolean("credentials_set").default(false),
   phoneCountryCode: varchar("phone_country_code", { length: 16 }),
   phoneNumber: varchar("phone_number", { length: 32 }),
   firstName: text("first_name"),

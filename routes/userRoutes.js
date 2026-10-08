@@ -16,6 +16,9 @@ router.get("/", userController.getAllUsers);
 router.put("/check", isAuthenticated, userController.checkloginvalidity);
 router.put("/checkuser", userController.verifyUserPhoneData);
 router.put("/editpass", userController.resetPassword);
+// Self-service email+password for the logged-in user (login-time modal). Before
+// "/:id" so the two-segment path is never read as an id.
+router.put("/me/credentials", isAuthenticated, userController.setMyCredentials);
 router.get("/:id", userController.getUserById);
 router.post("/create", userController.createUser);
 router.post("/login", userController.login);
